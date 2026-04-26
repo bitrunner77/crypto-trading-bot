@@ -224,13 +224,22 @@ class MarketAnalyst:
 
     def _call_claude(self, user_prompt: str, model: Optional[str] = None,
                      max_tokens: Optional[int] = None) -> str:
-        """Make a synchronous call to Claude and return the text response."""
+        """Make a synchronous call to Claude and return the text response.
+        Records token usage with the global cost tracker so dashboards can
+        show running session cost.
+        """
+        used_model = model or self._model_opus
         message = self._client.messages.create(
-            model=model or self._model_opus,
+            model=used_model,
             max_tokens=max_tokens or self._max_tokens,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        try:
+            from utils.cost_tracker import tracker
+            tracker.record(used_model, usage=getattr(message, "usage", None))
+        except Exception as e:  # cost tracking must never block trading
+            logger.debug(f"cost tracker skipped: {e}")
         return message.content[0].text
 
 

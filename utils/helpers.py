@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 import time
 from typing import Any, Callable, TypeVar
 
@@ -16,13 +17,48 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+_SECRET_PATTERNS = [
+    re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}"),
+    # Generic bearer-ish secrets that contain at least 24 base64-ish chars.
+    re.compile(r"\b[A-Za-z0-9+/=_-]{40,}\b"),
+]
+
+
+class _SecretRedactingFilter(logging.Filter):
+    """Replaces anything matching common API-key/secret shapes with [REDACTED].
+    Cheap defense-in-depth against accidental traceback leaks. The third
+    pattern is broad on purpose; it errs on the side of redacting too much
+    rather than leaking creds.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        redacted = msg
+        for pat in _SECRET_PATTERNS:
+            redacted = pat.sub("[REDACTED]", redacted)
+        if redacted != msg:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
     """Configure Rich-based logging for the whole application."""
+    handler = RichHandler(
+        rich_tracebacks=True,
+        markup=True,
+        console=Console(legacy_windows=False),
+    )
+    handler.addFilter(_SecretRedactingFilter())
     logging.basicConfig(
         level=level.upper(),
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(rich_tracebacks=True, markup=True, console=Console(legacy_windows=False))],
+        handlers=[handler],
     )
     # Silence noisy third-party loggers
     for name in ("ccxt", "websockets", "aiohttp", "asyncio"):

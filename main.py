@@ -220,7 +220,14 @@ async def run_trading(config):
                     # ── Per-symbol analysis ────────────────────────────────────
                     for symbol in config.trading_pairs:
                         try:
-                            df = await fetcher.fetch_ohlcv(symbol, config.timeframe, limit=200)
+                            try:
+                                df = await asyncio.wait_for(
+                                    fetcher.fetch_ohlcv(symbol, config.timeframe, limit=200),
+                                    timeout=getattr(config, "fetch_timeout_seconds", 30),
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(f"fetch_ohlcv timed out for {symbol}; skipping symbol this round")
+                                continue
                             if df.empty:
                                 continue
 
@@ -396,6 +403,8 @@ async def run_trading(config):
                     risk_sum = risk_mgr.get_risk_summary(
                         port_snapshot["total_value"], config.paper_initial_balance
                     )
+                    from utils.cost_tracker import tracker as _ai_cost
+                    ai_cost = _ai_cost.get_summary()
                     dashboard.update(
                         prices=prices,
                         portfolio=port_snapshot,
@@ -412,6 +421,7 @@ async def run_trading(config):
                         last_decision=last_decision,
                         risk_summary=risk_sum,
                         perf_metrics=perf,
+                        ai_cost=ai_cost,
                         round=round_num,
                     )
 

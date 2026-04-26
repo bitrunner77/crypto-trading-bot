@@ -1,11 +1,18 @@
 """
 ui/web_dashboard.py - Web dashboard server for the crypto trading bot.
 Run standalone: python -m ui.web_dashboard
-Or import and call start_dashboard_server() from main.
+Or import and call start_in_thread(...) from main.
+
+Defaults to binding 127.0.0.1 (loopback only). To open it up, set
+WEB_DASHBOARD_HOST. If WEB_DASHBOARD_TOKEN is set, the WebSocket and HTML
+endpoints both require ?token=<value>; if unset, the server logs a loud
+warning and runs unauthenticated (preserves dev UX).
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -16,11 +23,13 @@ if hasattr(sys.stderr, "reconfigure"):
 import asyncio
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse
+
+logger = logging.getLogger("cryptobot.web")
 
 # ── Path setup so we can import project modules ─────────────────────────────
 ROOT = Path(__file__).parent.parent
@@ -43,9 +52,23 @@ _state: Dict[str, Any] = {
     "last_decision": {},
     "risk_summary": {},
     "perf_metrics": {},
+    "ai_cost": {"total_calls": 0, "total_cost_usd": 0.0, "per_model": {}},
     "round": 0,
 }
 _clients: list[WebSocket] = []
+
+# Auth token. Read from env at request-time so callers can set it before
+# uvicorn starts via start_in_thread().
+def _expected_token() -> Optional[str]:
+    val = os.environ.get("WEB_DASHBOARD_TOKEN", "").strip()
+    return val or None
+
+
+def _check_token(provided: Optional[str]) -> bool:
+    expected = _expected_token()
+    if expected is None:
+        return True
+    return bool(provided) and provided == expected
 
 
 def update_state(**kwargs) -> None:
@@ -83,6 +106,7 @@ async def _push_loop() -> None:
                 "last_decision": _state.get("last_decision", {}),
                 "risk_summary": _state.get("risk_summary", {}),
                 "perf_metrics": _state.get("perf_metrics", {}),
+                "ai_cost": _state.get("ai_cost", {}),
                 "round": _state.get("round", 0),
                 "history": list(reversed(history)),
                 "trades": trades,
@@ -101,7 +125,10 @@ async def startup() -> None:
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket) -> None:
+async def websocket_endpoint(ws: WebSocket, token: Optional[str] = Query(default=None)) -> None:
+    if not _check_token(token):
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await ws.accept()
     _clients.append(ws)
     try:
@@ -392,7 +419,10 @@ function setKpi(id, val, cls) {
 let ws, reconnectTimer;
 
 function connect() {
-  ws = new WebSocket('ws://' + location.host + '/ws');
+  // Forward the ?token= query string to the WS endpoint so auth survives.
+  const token = new URLSearchParams(window.location.search).get('token');
+  const wsUrl = 'ws://' + location.host + '/ws' + (token ? '?token=' + encodeURIComponent(token) : '');
+  ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     document.getElementById('conn-status').className = 'ok';
@@ -557,24 +587,58 @@ connect();
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index(token: Optional[str] = Query(default=None)) -> str:
+    if not _check_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
     return HTML
 
 
 # ── Standalone entry point ───────────────────────────────────────────────────
 
-def run(host: str = "0.0.0.0", port: int = 8080) -> None:
+def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
-def start_in_thread(host: str = "0.0.0.0", port: int = 8080) -> None:
-    """Start dashboard in a background thread (called from main bot)."""
+def start_in_thread(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    enabled: Optional[bool] = None,
+) -> None:
+    """Start dashboard in a background thread.
+
+    Defaults read from env (WEB_DASHBOARD_HOST, WEB_DASHBOARD_PORT,
+    WEB_DASHBOARD_ENABLED). Set WEB_DASHBOARD_ENABLED=false to skip
+    starting the server. WEB_DASHBOARD_TOKEN, if set, gates access on
+    both the HTML route and the WebSocket.
+    """
+    if enabled is None:
+        enabled = os.environ.get("WEB_DASHBOARD_ENABLED", "true").lower() != "false"
+    if not enabled:
+        logger.info("Web dashboard disabled (WEB_DASHBOARD_ENABLED=false)")
+        return
+
+    host = host or os.environ.get("WEB_DASHBOARD_HOST", "127.0.0.1")
+    port = port or int(os.environ.get("WEB_DASHBOARD_PORT", "8080"))
+
+    if _expected_token() is None:
+        if host != "127.0.0.1":
+            logger.warning(
+                "Web dashboard bound to %s with no WEB_DASHBOARD_TOKEN set — "
+                "anyone on the network can read your portfolio. "
+                "Set WEB_DASHBOARD_TOKEN to require auth.",
+                host,
+            )
+        else:
+            logger.info("Web dashboard on loopback with no token (set WEB_DASHBOARD_TOKEN to lock down).")
+
     t = threading.Thread(target=run, args=(host, port), daemon=True)
     t.start()
-    print(f"\n  Dashboard: http://localhost:{port}\n")
+    print(f"\n  Dashboard: http://{host}:{port}\n")
 
 
 if __name__ == "__main__":
     init_db()
-    print("Dashboard running at http://localhost:8080")
-    run()
+    host = os.environ.get("WEB_DASHBOARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("WEB_DASHBOARD_PORT", "8080"))
+    print(f"Dashboard running at http://{host}:{port}")
+    run(host=host, port=port)
