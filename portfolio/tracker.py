@@ -131,6 +131,38 @@ class PortfolioTracker:
                 return pnl
         return None
 
+    @staticmethod
+    def realized_pnl_from_order(order: Dict, position: Optional[Dict]) -> float:
+        """Derive realised P&L for a closed leveraged perp position.
+
+        Prefer an exchange-supplied 'pnl' field (PaperExchange and some live
+        APIs return it). Otherwise reconstruct from the local position record:
+            long  → (exit - entry) × notional / entry
+            short → (entry - exit) × notional / entry
+        Returns 0.0 on missing data — caller should treat as "unknown".
+        """
+        if order is None:
+            return 0.0
+        if "pnl" in order and order["pnl"] is not None:
+            return float(order["pnl"])
+        if not position:
+            return 0.0
+        entry = float(position.get("entry_price") or 0)
+        exit_price = float(
+            order.get("close_price") or order.get("average") or order.get("price") or 0
+        )
+        if entry <= 0 or exit_price <= 0:
+            return 0.0
+        # `amount` in DB is margin USDT; we need notional. If leverage stored
+        # somewhere in position info, use it; otherwise assume 1x (conservative).
+        margin = float(position.get("amount") or 0)
+        leverage = int(position.get("leverage") or 1)
+        notional = margin * leverage
+        change = (exit_price - entry) / entry
+        if (position.get("side") or "").lower() == "short":
+            change = -change
+        return notional * change
+
     def get_performance_metrics(self) -> Dict:
         """Return Sharpe, win rate, and other metrics from trade history."""
         stats = self._db.get_trade_stats()

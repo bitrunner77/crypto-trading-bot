@@ -34,14 +34,14 @@ def db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def init_db() -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, then run any required migrations."""
     with db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS trades (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   TEXT    NOT NULL,
                 symbol      TEXT    NOT NULL,
-                side        TEXT    NOT NULL,   -- buy | sell
+                side        TEXT    NOT NULL,   -- buy | sell | long | short | close
                 price       REAL    NOT NULL,
                 amount      REAL    NOT NULL,
                 cost        REAL    NOT NULL,
@@ -53,16 +53,20 @@ def init_db() -> None:
                 pnl         REAL
             );
 
+            -- positions: (symbol, side) is the natural unique key so a
+            -- hedged long+short on the same symbol can coexist.
             CREATE TABLE IF NOT EXISTS positions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol      TEXT    NOT NULL UNIQUE,
+                symbol      TEXT    NOT NULL,
                 side        TEXT    NOT NULL,
                 entry_price REAL    NOT NULL,
                 amount      REAL    NOT NULL,
+                leverage    INTEGER NOT NULL DEFAULT 1,
                 stop_loss   REAL,
                 take_profit REAL,
                 opened_at   TEXT    NOT NULL,
-                updated_at  TEXT    NOT NULL
+                updated_at  TEXT    NOT NULL,
+                UNIQUE(symbol, side)
             );
 
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -93,6 +97,49 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_trades_timestamp  ON trades(timestamp);
             CREATE INDEX IF NOT EXISTS idx_ohlcv_lookup      ON ohlcv_cache(exchange, symbol, timeframe, timestamp);
         """)
+    _migrate_positions_schema()
+
+
+def _migrate_positions_schema() -> None:
+    """If the legacy positions table (UNIQUE(symbol), no leverage column)
+    exists, rebuild it with the new (symbol, side) uniqueness and leverage
+    column. Idempotent: a no-op once the new schema is in place.
+    """
+    with db() as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(positions)")}
+        # The new schema is detected by the presence of the `leverage` column.
+        if "leverage" in cols:
+            return
+
+        old_rows = conn.execute("SELECT * FROM positions").fetchall()
+        conn.execute("ALTER TABLE positions RENAME TO positions_legacy")
+        conn.execute("""
+            CREATE TABLE positions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol      TEXT    NOT NULL,
+                side        TEXT    NOT NULL,
+                entry_price REAL    NOT NULL,
+                amount      REAL    NOT NULL,
+                leverage    INTEGER NOT NULL DEFAULT 1,
+                stop_loss   REAL,
+                take_profit REAL,
+                opened_at   TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL,
+                UNIQUE(symbol, side)
+            )
+        """)
+        for r in old_rows:
+            conn.execute(
+                """INSERT INTO positions
+                   (symbol, side, entry_price, amount, leverage, stop_loss,
+                    take_profit, opened_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    r["symbol"], r["side"], r["entry_price"], r["amount"], 1,
+                    r["stop_loss"], r["take_profit"], r["opened_at"], r["updated_at"],
+                ),
+            )
+        conn.execute("DROP TABLE positions_legacy")
 
 
 # ── Trade helpers ──────────────────────────────────────────────────────────────
@@ -171,23 +218,36 @@ def upsert_position(
     amount: float,
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
+    leverage: int = 1,
 ) -> None:
     now = datetime.utcnow().isoformat()
     with db() as conn:
         conn.execute(
-            """INSERT INTO positions (symbol, side, entry_price, amount, stop_loss, take_profit, opened_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(symbol) DO UPDATE SET
-                   side=excluded.side, entry_price=excluded.entry_price,
-                   amount=excluded.amount, stop_loss=excluded.stop_loss,
-                   take_profit=excluded.take_profit, updated_at=excluded.updated_at""",
-            (symbol, side, entry_price, amount, stop_loss, take_profit, now, now),
+            """INSERT INTO positions
+                   (symbol, side, entry_price, amount, leverage,
+                    stop_loss, take_profit, opened_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(symbol, side) DO UPDATE SET
+                   entry_price=excluded.entry_price,
+                   amount=excluded.amount,
+                   leverage=excluded.leverage,
+                   stop_loss=excluded.stop_loss,
+                   take_profit=excluded.take_profit,
+                   updated_at=excluded.updated_at""",
+            (symbol, side, entry_price, amount, leverage,
+             stop_loss, take_profit, now, now),
         )
 
 
-def delete_position(symbol: str) -> None:
+def delete_position(symbol: str, side: Optional[str] = None) -> None:
+    """Delete position(s) for `symbol`. If `side` is given, only that side."""
     with db() as conn:
-        conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        if side is None:
+            conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
+        else:
+            conn.execute(
+                "DELETE FROM positions WHERE symbol=? AND side=?", (symbol, side)
+            )
 
 
 def get_positions() -> List[Dict]:

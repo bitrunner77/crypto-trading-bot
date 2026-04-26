@@ -8,7 +8,18 @@ from typing import Dict, List, Optional
 
 
 class ExchangeClient(ABC):
-    """Unified interface for exchange operations (live or paper)."""
+    """Unified interface for leveraged-perp exchange operations (live or paper).
+
+    Side semantics for `create_order`:
+        - "long"  → open or add to a long  perp position
+        - "short" → open or add to a short perp position
+        - "close" → fully reduce / close the existing position on `symbol`
+
+    `amount` is denominated in *quote-currency margin* (USDT/USDC). Concrete
+    clients are responsible for converting margin × leverage / price into
+    contract amount when the exchange requires that, and for setting leverage
+    before order submission.
+    """
 
     @abstractmethod
     async def fetch_ohlcv(
@@ -37,8 +48,14 @@ class ExchangeClient(ABC):
     async def create_order(
         self, symbol: str, side: str, amount: float,
         price: Optional[float] = None, order_type: str = "market",
+        leverage: int = 1,
     ) -> Dict:
-        """Place an order. Returns order dict with id, status, filled, etc."""
+        """Place an order. Returns order dict with at least:
+              id, symbol, side, status, price, amount
+        Status must be one of CCXT's statuses: 'open' | 'closed' | 'canceled',
+        where 'closed' means fully filled. PaperExchange uses the same.
+        For side='close', returns include 'pnl' (realized) and 'returned'.
+        """
 
     @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> Dict:
@@ -47,6 +64,13 @@ class ExchangeClient(ABC):
     @abstractmethod
     async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
         """Return list of open orders."""
+
+    async def check_liquidations(self, current_prices: Dict[str, float]) -> List[str]:
+        """Return symbols whose positions have been (or should be considered)
+        liquidated. Default no-op for clients that don't track positions
+        locally; concrete clients override.
+        """
+        return []
 
     @abstractmethod
     async def close(self) -> None:

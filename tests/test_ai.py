@@ -153,6 +153,12 @@ class TestMarketAnalystMocked:
         config.paper_initial_balance = 10000.0
         config.risk_max_position_pct = 0.5
         config.risk_max_drawdown_pct = 0.9
+        # Explicit AI config attrs (real types, not MagicMock children)
+        config.ai_model_opus = "claude-opus-4-7"
+        config.ai_model_haiku = "claude-haiku-4-5-20251001"
+        config.ai_max_tokens = 4096
+        config.ai_screen_max_tokens = 256
+        config.ai_escalate_threshold = 0.55
 
         snapshot = make_snapshot()
 

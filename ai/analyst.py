@@ -23,11 +23,9 @@ from analysis.market_context import MarketSnapshot
 
 logger = logging.getLogger("cryptobot.analyst")
 
-MODEL_OPUS  = "claude-opus-4-6"
-MODEL_HAIKU = "claude-haiku-4-5-20251001"
-MAX_TOKENS  = 4096
-SCREEN_TOKENS = 256          # Haiku only needs a tiny response
-ESCALATE_THRESHOLD = 0.55    # signal_strength above this → call Opus
+
+class AIResponseParseError(ValueError):
+    """Raised when the model's text response cannot be coerced to a JSON dict."""
 
 
 class MarketAnalyst:
@@ -42,10 +40,16 @@ class MarketAnalyst:
     def __init__(self, config):
         self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
         self._config = config
+        # Configurable via config (defaults preserve current behaviour).
+        self._model_opus = getattr(config, "ai_model_opus", "claude-opus-4-7")
+        self._model_haiku = getattr(config, "ai_model_haiku", "claude-haiku-4-5-20251001")
+        self._max_tokens = getattr(config, "ai_max_tokens", 4096)
+        self._screen_tokens = getattr(config, "ai_screen_max_tokens", 256)
+        self._escalate_threshold = getattr(config, "ai_escalate_threshold", 0.55)
         logger.info(
             f"Market analyst initialized — "
-            f"screener: [bold]{MODEL_HAIKU}[/bold]  "
-            f"analyst: [bold]{MODEL_OPUS}[/bold]"
+            f"screener: [bold]{self._model_haiku}[/bold]  "
+            f"analyst: [bold]{self._model_opus}[/bold]"
         )
 
     def analyze(
@@ -72,7 +76,7 @@ class MarketAnalyst:
         )
 
         # If Haiku says pass → return hold immediately, no Opus call
-        if not escalate or signal_strength < ESCALATE_THRESHOLD:
+        if not escalate or signal_strength < self._escalate_threshold:
             return TradeDecision(
                 action="hold",
                 symbol=snapshot.symbol,
@@ -155,7 +159,9 @@ class MarketAnalyst:
         """Fast cheap Haiku screen — returns escalate bool + signal strength."""
         prompt = build_haiku_screen_prompt(snapshot)
         try:
-            raw = self._call_claude(prompt, model=MODEL_HAIKU, max_tokens=SCREEN_TOKENS)
+            raw = self._call_claude(
+                prompt, model=self._model_haiku, max_tokens=self._screen_tokens
+            )
             return _parse_json(raw)
         except Exception as e:
             logger.warning(f"Haiku screen failed for {snapshot.symbol}: {e} — defaulting to escalate")
@@ -163,30 +169,36 @@ class MarketAnalyst:
 
     def _call_asset_analysis(self, snapshot: MarketSnapshot, recent_pnl: list) -> TradeDecision:
         prompt = build_asset_prompt(snapshot, recent_pnl)
+        last_err: Optional[Exception] = None
         for attempt in range(3):
             try:
                 raw = self._call_claude(prompt)
                 data = _parse_json(raw)
-                # Ensure new fields have defaults if missing from response
                 data.setdefault("leverage", 1)
                 data.setdefault("changes_from_last_round", "")
-                return TradeDecision(**data)
+                decision = TradeDecision(**data)
+                _validate_decision(decision)
+                return decision
             except Exception as e:
+                last_err = e
                 logger.warning(f"Asset analysis attempt {attempt + 1} failed: {e}")
-                if attempt == 2:
-                    return TradeDecision(
-                        action="hold",
-                        symbol=snapshot.symbol,
-                        size_pct=0.0,
-                        leverage=1,
-                        stop_loss_pct=self._config.risk_stop_loss_pct,
-                        take_profit_pct=self._config.risk_take_profit_pct,
-                        confidence=0.0,
-                        timeframe=snapshot.timeframe,
-                        reasoning=f"AI analysis failed after 3 attempts: {e}",
-                        key_signals=[],
-                        risk_level="high",
-                    )
+        return self._safe_hold(snapshot, f"AI analysis failed after 3 attempts: {last_err}")
+
+    def _safe_hold(self, snapshot: MarketSnapshot, reason: str) -> TradeDecision:
+        """Build a defensive 'hold' decision when AI output cannot be trusted."""
+        return TradeDecision(
+            action="hold",
+            symbol=snapshot.symbol,
+            size_pct=0.0,
+            leverage=1,
+            stop_loss_pct=self._config.risk_stop_loss_pct,
+            take_profit_pct=self._config.risk_take_profit_pct,
+            confidence=0.0,
+            timeframe=snapshot.timeframe,
+            reasoning=reason,
+            key_signals=[],
+            risk_level="high",
+        )
 
     def _call_risk_validation(
         self, decision: TradeDecision, snapshot: MarketSnapshot
@@ -210,11 +222,12 @@ class MarketAnalyst:
             logger.warning(f"Risk validation failed (auto-approve with caution): {e}")
             return RiskAssessment(approved=True, reasoning=f"Validation error: {e}")
 
-    def _call_claude(self, user_prompt: str, model: str = MODEL_OPUS, max_tokens: int = MAX_TOKENS) -> str:
+    def _call_claude(self, user_prompt: str, model: Optional[str] = None,
+                     max_tokens: Optional[int] = None) -> str:
         """Make a synchronous call to Claude and return the text response."""
         message = self._client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
+            model=model or self._model_opus,
+            max_tokens=max_tokens or self._max_tokens,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -222,15 +235,43 @@ class MarketAnalyst:
 
 
 def _parse_json(text: str) -> Dict:
-    """Extract and parse JSON from Claude's response (handles markdown code blocks)."""
-    # Strip markdown code blocks if present
+    """Extract and parse a JSON object from Claude's response.
+
+    Handles markdown code-block fences and prose around the JSON. Raises
+    AIResponseParseError if no JSON object can be located or it doesn't
+    parse to a dict.
+    """
+    if not text or not text.strip():
+        raise AIResponseParseError("empty response from model")
+
     text = text.strip()
     match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
     if match:
         text = match.group(1)
-    # Find JSON object
+
     start = text.find("{")
     end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        text = text[start:end]
-    return json.loads(text)
+    if start < 0 or end <= start:
+        raise AIResponseParseError(f"no JSON object in response: {text[:120]!r}")
+
+    try:
+        data = json.loads(text[start:end])
+    except json.JSONDecodeError as e:
+        raise AIResponseParseError(f"invalid JSON: {e}") from e
+
+    if not isinstance(data, dict):
+        raise AIResponseParseError(f"expected JSON object, got {type(data).__name__}")
+    return data
+
+
+def _validate_decision(decision: TradeDecision) -> None:
+    """Reject self-contradictory decisions before they can reach the trader."""
+    if decision.action in ("long", "short"):
+        if decision.size_pct <= 0:
+            raise AIResponseParseError(
+                f"action={decision.action} requires size_pct>0 (got {decision.size_pct})"
+            )
+        if decision.leverage < 1:
+            raise AIResponseParseError(
+                f"action={decision.action} requires leverage>=1 (got {decision.leverage})"
+            )

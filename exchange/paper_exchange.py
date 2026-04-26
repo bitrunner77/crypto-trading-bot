@@ -225,7 +225,7 @@ class PaperExchange(ExchangeClient):
         self._orders.append(order)
         return order
 
-    def check_liquidations(self, current_prices: Dict[str, float]) -> List[str]:
+    async def check_liquidations(self, current_prices: Dict[str, float]) -> List[str]:
         """
         Check if any open positions hit their liquidation price.
         Returns list of liquidated symbols.

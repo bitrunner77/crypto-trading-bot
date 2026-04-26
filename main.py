@@ -208,11 +208,14 @@ async def run_trading(config):
                         break
 
                     # ── Check for liquidations ────────────────────────────────
-                    if hasattr(exchange, "check_liquidations"):
-                        liquidated = exchange.check_liquidations(prices)
-                        for sym in liquidated:
-                            db_mod.delete_position(sym)
-                            logger.error(f"Position liquidated: {sym}")
+                    try:
+                        liquidated = await exchange.check_liquidations(prices)
+                    except Exception as e:
+                        logger.warning(f"Liquidation check failed: {e}")
+                        liquidated = []
+                    for sym in liquidated:
+                        db_mod.delete_position(sym)
+                        logger.error(f"Position liquidated: {sym}")
 
                     # ── Per-symbol analysis ────────────────────────────────────
                     for symbol in config.trading_pairs:
@@ -287,27 +290,47 @@ async def run_trading(config):
                                         current_price, action, sl
                                     )
 
-                                    order = await exchange.create_order(
-                                        symbol, action, margin,
-                                        price=current_price, leverage=adj_lev
-                                    )
+                                    try:
+                                        order = await exchange.create_order(
+                                            symbol, action, margin,
+                                            price=current_price, leverage=adj_lev
+                                        )
+                                    except Exception as oe:
+                                        logger.error(
+                                            f"create_order FAILED for {symbol} {action}: {oe}",
+                                            exc_info=True,
+                                        )
+                                        order = None
 
-                                    db_mod.upsert_position(
-                                        symbol, action, current_price, margin, sl, tp
-                                    )
-                                    db_mod.log_trade(
-                                        symbol=symbol, side=action,
-                                        price=current_price, amount=margin,
-                                        strategy=config.strategy,
-                                        mode=config.trading_mode,
-                                        reasoning=signal_obj.reasoning,
-                                        confidence=signal_obj.confidence,
-                                    )
-                                    recent_pnl.append({
-                                        "round": round_num, "symbol": symbol,
-                                        "action": action, "price": current_price,
-                                        "leverage": adj_lev, "margin": margin,
-                                    })
+                                    if order and order.get("status") in ("closed", "filled"):
+                                        fill_price = (
+                                            order.get("average")
+                                            or order.get("price")
+                                            or current_price
+                                        )
+                                        db_mod.upsert_position(
+                                            symbol, action, fill_price, margin, sl, tp,
+                                            leverage=adj_lev,
+                                        )
+                                        db_mod.log_trade(
+                                            symbol=symbol, side=action,
+                                            price=fill_price, amount=margin,
+                                            strategy=config.strategy,
+                                            mode=config.trading_mode,
+                                            reasoning=signal_obj.reasoning,
+                                            confidence=signal_obj.confidence,
+                                        )
+                                        recent_pnl.append({
+                                            "round": round_num, "symbol": symbol,
+                                            "action": action, "price": fill_price,
+                                            "leverage": adj_lev, "margin": margin,
+                                        })
+                                    else:
+                                        logger.warning(
+                                            f"Order for {symbol} {action} not filled "
+                                            f"(status={order.get('status') if order else 'error'}); "
+                                            "skipping persistence."
+                                        )
                                 else:
                                     logger.info(f"Trade blocked by risk: {reason}")
 
@@ -315,30 +338,47 @@ async def run_trading(config):
                                 # ── Close existing position ──────────────────
                                 pos_list = [p for p in db_mod.get_positions() if p["symbol"] == symbol]
                                 if pos_list:
+                                    pos_record = pos_list[0]
                                     current_price = indicators.get("price", 0)
                                     console.print(
                                         f"[yellow]CLOSING {symbol} @ ${current_price:,.2f} — "
                                         f"{signal_obj.reasoning[:80]}[/yellow]"
                                     )
-                                    order = await exchange.create_order(
-                                        symbol, "close", 0, price=current_price
-                                    )
-                                    pnl = order.get("pnl", 0.0)
-                                    risk_mgr.record_pnl(pnl)
-                                    db_mod.delete_position(symbol)
-                                    db_mod.log_trade(
-                                        symbol=symbol, side="close",
-                                        price=current_price, amount=0,
-                                        strategy=config.strategy,
-                                        mode=config.trading_mode,
-                                        reasoning=signal_obj.reasoning,
-                                        confidence=signal_obj.confidence,
-                                        pnl=pnl,
-                                    )
-                                    recent_pnl.append({
-                                        "round": round_num, "symbol": symbol,
-                                        "action": "close", "pnl": pnl,
-                                    })
+                                    try:
+                                        order = await exchange.create_order(
+                                            symbol, "close", 0, price=current_price
+                                        )
+                                    except Exception as oe:
+                                        logger.error(
+                                            f"close order FAILED for {symbol}: {oe}",
+                                            exc_info=True,
+                                        )
+                                        order = None
+
+                                    if order and order.get("status") in ("closed", "filled"):
+                                        pnl = PortfolioTracker.realized_pnl_from_order(
+                                            order, pos_record
+                                        )
+                                        risk_mgr.record_pnl(pnl)
+                                        db_mod.delete_position(symbol)
+                                        db_mod.log_trade(
+                                            symbol=symbol, side="close",
+                                            price=current_price, amount=0,
+                                            strategy=config.strategy,
+                                            mode=config.trading_mode,
+                                            reasoning=signal_obj.reasoning,
+                                            confidence=signal_obj.confidence,
+                                            pnl=pnl,
+                                        )
+                                        recent_pnl.append({
+                                            "round": round_num, "symbol": symbol,
+                                            "action": "close", "pnl": pnl,
+                                        })
+                                    else:
+                                        logger.warning(
+                                            f"Close order for {symbol} not filled; "
+                                            "DB position retained."
+                                        )
 
                         except Exception as e:
                             logger.error(f"Error processing {symbol}: {e}", exc_info=True)

@@ -19,6 +19,11 @@ class Settings(BaseSettings):
 
     # ── Anthropic ──────────────────────────────────────────────────────────────
     anthropic_api_key: str = Field(..., description="Anthropic API key")
+    ai_model_opus: str = Field("claude-opus-4-7", description="Claude model for deep analysis")
+    ai_model_haiku: str = Field("claude-haiku-4-5-20251001", description="Claude model for fast screen")
+    ai_max_tokens: int = Field(4096, description="Max tokens for Opus analysis response")
+    ai_screen_max_tokens: int = Field(256, description="Max tokens for Haiku screen response")
+    ai_escalate_threshold: float = Field(0.55, description="Min Haiku signal_strength to call Opus")
 
     # ── Exchange ───────────────────────────────────────────────────────────────
     exchange: str = Field("bybit", description="CCXT exchange id")
