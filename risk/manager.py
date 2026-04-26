@@ -9,7 +9,7 @@ Rules enforced:
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from utils.helpers import clamp
@@ -88,6 +88,17 @@ class RiskManager:
             size_pct = clamp(size_pct, 0.01, max_size_pct)
             logger.warning(f"Notional capped: adjusted size to {size_pct:.1%}")
 
+        # 7. Daily loss circuit breaker. If today's realized PnL has dropped
+        # below -(risk_max_daily_loss_pct × initial_balance), halt new entries.
+        max_daily_loss = self._config.risk_max_daily_loss_pct * max(initial_balance, 0.0)
+        if max_daily_loss > 0 and self.get_daily_pnl() <= -max_daily_loss:
+            reason = (
+                f"Daily loss limit hit: realized P&L "
+                f"${self.get_daily_pnl():,.2f} ≤ -${max_daily_loss:,.2f}"
+            )
+            self._halt(reason)
+            return False, 0.0, 1, reason
+
         return True, size_pct, leverage, "OK"
 
     # ── Liquidation price calculation ──────────────────────────────────────────
@@ -146,12 +157,16 @@ class RiskManager:
 
     # ── P&L + balance tracking ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _today_utc() -> str:
+        return datetime.now(timezone.utc).date().isoformat()
+
     def record_pnl(self, pnl: float) -> None:
-        today = str(date.today())
-        self._daily_pnl[today] = self._daily_pnl.get(today, 0.0) + pnl
+        key = self._today_utc()
+        self._daily_pnl[key] = self._daily_pnl.get(key, 0.0) + pnl
 
     def get_daily_pnl(self) -> float:
-        return self._daily_pnl.get(str(date.today()), 0.0)
+        return self._daily_pnl.get(self._today_utc(), 0.0)
 
     def check_bankruptcy(self, balance: float) -> bool:
         """Returns True if the trader is out (balance ≤ $0)."""
