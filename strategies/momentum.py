@@ -47,8 +47,20 @@ class MomentumStrategy(BaseStrategy):
 
         has_position = any(p["symbol"] == symbol for p in open_positions)
 
+        # Compare last COMPLETED candle against prior 5 completed candles.
+        # Never use iloc[-1] — that's the current building candle (always looks low).
+        if len(df) >= 7:
+            vol_series      = df["volume"].astype(float)
+            completed_vol   = float(vol_series.iloc[-2])          # last closed candle
+            local_avg       = float(vol_series.iloc[-7:-2].mean()) # 5 candles before that
+            vol_ratio_local = completed_vol / local_avg if local_avg > 0 else vol_ratio
+        else:
+            vol_ratio_local = vol_ratio
+
         # ── SELL SIGNAL ────────────────────────────────────────────────────────
         if has_position:
+            if vol_ratio_local is not None and vol_ratio_local < 0.4:
+                return self._hold(symbol, f"Volume too low to exit ({vol_ratio_local:.2f}x recent)")
             sell_signals = 0
             reasons = []
             if ema9 < ema21:
@@ -75,6 +87,10 @@ class MomentumStrategy(BaseStrategy):
 
         # ── BUY SIGNAL ─────────────────────────────────────────────────────────
         if not has_position:
+            # Hard minimum: skip dead/illiquid candles (vs recent 5 candles, not 20)
+            if vol_ratio_local is not None and vol_ratio_local < 0.2:
+                return self._hold(symbol, f"Volume too low ({vol_ratio_local:.2f}x recent — need ≥0.2x)")
+
             buy_signals = 0
             reasons = []
 
@@ -87,9 +103,9 @@ class MomentumStrategy(BaseStrategy):
             if rsi and 40 <= rsi <= 65:
                 buy_signals += 1
                 reasons.append(f"RSI in sweet spot ({rsi:.0f})")
-            if vol_ratio and vol_ratio > 1.5:
+            if vol_ratio_local and vol_ratio_local > 1.5:
                 buy_signals += 1
-                reasons.append(f"Volume spike ({vol_ratio:.1f}x)")
+                reasons.append(f"Volume spike ({vol_ratio_local:.1f}x recent)")
             if macd_hist and macd_hist > 0:
                 buy_signals += 1
                 reasons.append("MACD histogram positive")

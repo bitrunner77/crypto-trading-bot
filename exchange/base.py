@@ -36,7 +36,8 @@ class ExchangeClient(ABC):
     @abstractmethod
     async def create_order(
         self, symbol: str, side: str, amount: float,
-        price: Optional[float] = None, order_type: str = "market",
+        price: Optional[float] = None, leverage: int = 1, order_type: str = "market",
+        stop_loss: Optional[float] = None, take_profit: Optional[float] = None,
     ) -> Dict:
         """Place an order. Returns order dict with id, status, filled, etc."""
 

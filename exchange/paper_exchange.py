@@ -120,6 +120,8 @@ class PaperExchange(ExchangeClient):
         price: Optional[float] = None,
         order_type: str = "market",
         leverage: int = 1,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
     ) -> Dict:
         ticker = await self.fetch_ticker(symbol)
         entry_price = ticker["last"]

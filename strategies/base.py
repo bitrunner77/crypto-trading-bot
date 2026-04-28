@@ -13,7 +13,7 @@ import pandas as pd
 @dataclass
 class Signal:
     """A trading signal produced by a strategy."""
-    action: str               # "buy" | "sell" | "hold"
+    action: str               # "buy" | "sell" | "hold" | "long" | "short" | "close"
     symbol: str
     size_pct: float           # Fraction of available cash (0.0–1.0)
     stop_loss_pct: float
@@ -21,6 +21,7 @@ class Signal:
     confidence: float         # 0.0–1.0
     reasoning: str
     strategy_name: str
+    leverage: int = 1         # Leverage multiplier (1 = no leverage)
 
 
 class BaseStrategy(ABC):

@@ -59,7 +59,7 @@ class MeanReversionStrategy(BaseStrategy):
                     stop_loss_pct=self._config.risk_stop_loss_pct,
                     take_profit_pct=self._config.risk_take_profit_pct,
                     confidence=confidence,
-                    reasoning=f"Price at upper BB (${price:.2f} ≥ ${bb_upper:.2f}), RSI={rsi:.0f if rsi else 'N/A'}",
+                    reasoning=f"Price at upper BB (${price:.2f} ≥ ${bb_upper:.2f}), RSI={f'{rsi:.0f}' if rsi else 'N/A'}",
                     strategy_name=self.name,
                 )
             # Take partial profit at midband

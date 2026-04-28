@@ -22,15 +22,18 @@ class Settings(BaseSettings):
 
     # ── Exchange ───────────────────────────────────────────────────────────────
     exchange: str = Field("bybit", description="CCXT exchange id")
-    exchange_api_key: str = Field("", description="Exchange API key (not used by Hyperliquid)")
+    exchange_api_key: str = Field("", description="Exchange API key")
     exchange_api_secret: str = Field("", description="Exchange API secret / Hyperliquid private key")
+    exchange_passphrase: str = Field("", description="Exchange API passphrase (BitGet, OKX, etc.)")
     exchange_wallet_address: str = Field("", description="Wallet address (Hyperliquid only)")
 
     # ── Trading ────────────────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = Field("paper")
     # Perpetual futures pairs. Hyperliquid uses USDC margin (BTC/USDC:USDC).
     trading_pairs: List[str] = Field(default=["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"])
-    strategy: Literal["ai_driven", "momentum", "mean_reversion", "grid", "dca"] = Field("ai_driven")
+    strategy: Literal["ai_driven", "momentum", "mean_reversion", "grid", "dca",
+                      "regime_mean_reversion", "regime_momentum",
+                      "scalping", "regime_scalping"] = Field("ai_driven")
     timeframe: str = Field("1h")
     loop_interval_seconds: int = Field(60)
 
@@ -63,6 +66,38 @@ class Settings(BaseSettings):
 
     # ── Logging ────────────────────────────────────────────────────────────────
     log_level: str = Field("INFO")
+
+    # ── Advanced Features ──────────────────────────────────────────────────────
+    whale_volume_threshold: float = Field(3.0)
+    session_sniper_mode:    bool  = Field(True)
+    auto_optimize_weekly:   bool  = Field(True)
+    strategy_rotation_enabled: bool = Field(True)
+    equity_optimizer_enabled:  bool = Field(True)
+
+    # ── V7 Features ────────────────────────────────────────────────────────────
+    coin_pool: List[str] = Field(default_factory=list, description="Full scan universe for coin rotator")
+    coin_rotation_enabled:      bool  = Field(True)
+    coin_rotation_max_active:   int   = Field(2)
+    hedging_enabled:            bool  = Field(True)
+    hedge_trigger_pct:          float = Field(0.05)
+    hedge_ratio:                float = Field(0.50)
+    equity_protection_enabled:  bool  = Field(True)
+    manipulation_detection:     bool  = Field(True)
+    dynamic_leverage_enabled:   bool  = Field(True)
+    session_learning_enabled:   bool  = Field(True)
+
+    # ── V8 Features ────────────────────────────────────────────────────────────
+    news_sentiment_enabled:      bool  = Field(True)
+    messari_api_key:             str   = Field("")
+    btc_dominance_enabled:       bool  = Field(True)
+    portfolio_slots:             int   = Field(3)
+    portfolio_allocator_enabled: bool  = Field(True)
+    monthly_growth_target:       float = Field(0.10)
+    growth_engine_enabled:       bool  = Field(True)
+
+    # ── Telegram ───────────────────────────────────────────────────────────────
+    telegram_bot_token: str = Field("", description="Telegram bot token")
+    telegram_chat_id:   str = Field("", description="Telegram chat ID")
 
     @field_validator("trading_pairs", mode="before")
     @classmethod

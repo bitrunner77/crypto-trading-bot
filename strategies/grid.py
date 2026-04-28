@@ -9,9 +9,24 @@ from typing import Dict, List
 
 import pandas as pd
 
+from analysis.regime_detector import detect_regime
 from strategies.base import BaseStrategy, Signal
 
+GRID_REGIMES = {"mean_reverting", "low_vol"}
+
 logger = logging.getLogger("cryptobot.strategy.grid")
+
+
+def _dynamic_leverage(df: pd.DataFrame, price: float) -> int:
+    """Higher leverage when calm, lower when volatile. Clamps 2x–5x."""
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift()).abs(),
+        (df["low"]  - df["close"].shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr = float(tr.rolling(14).mean().iloc[-1])
+    atr_pct = atr / price if price > 0 else 0.01
+    return max(2, min(5, round(0.02 / atr_pct)))
 
 
 class GridStrategy(BaseStrategy):
@@ -57,9 +72,15 @@ class GridStrategy(BaseStrategy):
         open_positions: list,
         **kwargs,
     ) -> Signal:
+        regime = detect_regime(df).regime if len(df) >= 25 else "unknown"
+        if regime not in GRID_REGIMES:
+            return self._hold(symbol, f"Grid paused — regime={regime} (need mean_reverting or low_vol)")
+
         price = indicators.get("price")
         if not price:
             return self._hold(symbol, "No price data")
+
+        lev = _dynamic_leverage(df, price)
 
         # Initialize grid on first run or if price moved > 2x grid width
         if not self._initialized or abs(price - self._base_price) / self._base_price > self._config.grid_levels * self._config.grid_spread_pct:
@@ -82,6 +103,7 @@ class GridStrategy(BaseStrategy):
                         confidence=0.75,
                         reasoning=f"Grid sell triggered at ${level['price']:,.2f} (level {level['index']})",
                         strategy_name=self.name,
+                        leverage=lev,
                     )
 
         # Check buy levels
@@ -98,6 +120,7 @@ class GridStrategy(BaseStrategy):
                         confidence=0.70,
                         reasoning=f"Grid buy triggered at ${level['price']:,.2f} (level {level['index']})",
                         strategy_name=self.name,
+                        leverage=lev,
                     )
 
         return self._hold(symbol, f"No grid level triggered (price=${price:,.2f})")

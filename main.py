@@ -29,9 +29,12 @@ import argparse
 import asyncio
 import logging
 import signal
-import sys
-from datetime import datetime
-from typing import Dict, List, Optional
+
+# Windows: aiohttp's async DNS resolver breaks on ProactorEventLoop (Python 3.8+).
+# SelectorEventLoop uses the system resolver reliably.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+from typing import Dict, List
 
 from rich.console import Console
 from rich.panel import Panel
@@ -93,7 +96,8 @@ def parse_args():
     parser.add_argument("--mode", choices=["paper", "live", "backtest"],
                         default=None)
     parser.add_argument("--strategy",
-                        choices=["ai_driven", "momentum", "mean_reversion", "grid", "dca"],
+                        choices=["ai_driven", "momentum", "mean_reversion", "grid", "dca",
+                                 "regime_mean_reversion", "regime_momentum"],
                         default=None)
     parser.add_argument("--pairs", nargs="+")
     parser.add_argument("--timeframe", default=None)
@@ -141,6 +145,24 @@ async def run_trading(config):
     from data.fetcher import DataFetcher
     from exchange.websocket_manager import PriceFeed
     from analysis.indicators import compute_indicators
+    from analysis.whale_tracker import detect_whale_activity
+    from analysis.funding_sentiment import fetch_funding_sentiment
+    from analysis.breakout_validator import validate_breakout
+    from analysis.session_timer import get_session_info
+    from analysis.trailing_exit import TrailingExitManager
+    from analysis.equity_optimizer import analyze_equity
+    from analysis.strategy_rotator import StrategyRotator
+    from analysis.regime_detector import detect_regime
+    from analysis.coin_rotator import CoinRotator
+    from analysis.hedging import HedgeManager
+    from analysis.equity_protection import EquityProtector
+    from analysis.manipulation_detector import detect_manipulation
+    from analysis.dynamic_leverage import calculate_dynamic_leverage
+    from analysis.session_learner import SessionLearner
+    from analysis.news_sentiment import fetch_news_sentiment
+    from analysis.btc_dominance import fetch_btc_dominance, alt_size_multiplier
+    from analysis.portfolio_allocator import PortfolioAllocator
+    from analysis.growth_engine import GrowthEngine
     from portfolio.tracker import PortfolioTracker
     from risk.manager import RiskManager
     from strategies.registry import get_strategy
@@ -153,12 +175,45 @@ async def run_trading(config):
     init_db()
     start_in_thread(port=8080)
 
+    from scripts.telegram_commander import TelegramCommander
+    from scripts.weekly_optimizer import should_run_weekly, run_optimization
+
     exchange = make_exchange(config)
+    if hasattr(exchange, "init_session"):
+        await exchange.init_session()
     fetcher = DataFetcher(exchange, config)
     strategy = get_strategy(config.strategy, config)
     risk_mgr = RiskManager(config)
     portfolio = PortfolioTracker(exchange, config, db_mod)
     dashboard = Dashboard(config)
+
+    # ── Advanced feature modules ──────────────────────────────────────────────
+    trailing_exits  = TrailingExitManager()
+    equity_curve:   List[float] = []
+    rotator         = StrategyRotator(config.strategy)
+    coin_rotator    = CoinRotator(max_active=config.coin_rotation_max_active)
+    hedge_mgr       = HedgeManager(config.hedge_trigger_pct, config.hedge_ratio)
+    eq_protector    = EquityProtector()
+    sess_learner    = SessionLearner()
+    allocator       = PortfolioAllocator(n_slots=config.portfolio_slots)
+    growth_engine   = GrowthEngine(target_pct=config.monthly_growth_target)
+    _signals:       Dict = {}
+
+    _tg_state: Dict = {
+        "strategy": config.strategy, "mode": config.trading_mode,
+        "portfolio": {}, "risk_summary": {}, "perf_metrics": {},
+        "positions": [], "round": 0, "signals": {},
+        "coin_scores": [], "protection": "GREEN",
+    }
+    telegram = TelegramCommander(
+        token=config.telegram_bot_token,
+        chat_id=config.telegram_chat_id,
+        state=_tg_state,
+        pause_cb=lambda: risk_mgr._halt("Paused via Telegram"),
+        resume_cb=risk_mgr.resume_trading,
+        rotate_cb=lambda s: rotator.apply_rotation(s),
+    )
+    telegram.start()
 
     # Price feed
     price_feed = PriceFeed(exchange, config.trading_pairs, poll_interval=5.0)
@@ -167,7 +222,7 @@ async def run_trading(config):
 
     shutdown_event = asyncio.Event()
 
-    def _shutdown(sig, frame):
+    def _shutdown(_sig, _frame):
         logger.info("Shutdown signal received...")
         shutdown_event.set()
 
@@ -222,6 +277,34 @@ async def run_trading(config):
                                 continue
 
                             indicators = compute_indicators(df)
+
+                            # ── Signal sources ────────────────────────────────
+                            session_info = get_session_info()
+                            whale_sig    = detect_whale_activity(df, config.whale_volume_threshold)
+                            manip_sig    = (detect_manipulation(df, config.whale_volume_threshold)
+                                            if config.manipulation_detection else None)
+                            news_sig     = (fetch_news_sentiment(symbol, config.messari_api_key)
+                                            if config.news_sentiment_enabled else None)
+                            dom_sig      = (fetch_btc_dominance()
+                                            if config.btc_dominance_enabled else None)
+                            try:
+                                funding_sig = fetch_funding_sentiment(exchange, symbol)
+                            except Exception:
+                                funding_sig = None
+                            _signals[symbol] = {
+                                "session":  session_info.description,
+                                "whale":    whale_sig.description if whale_sig.detected else None,
+                                "funding":  funding_sig.description if funding_sig else None,
+                                "manip":    manip_sig.description if (manip_sig and manip_sig.detected) else None,
+                                "news":     news_sig.description if news_sig else None,
+                                "dominance": dom_sig.description if dom_sig else None,
+                            }
+
+                            # ── Manipulation guard ─────────────────────────────
+                            if manip_sig and manip_sig.action == "avoid":
+                                logger.info(f"[MANIP] {symbol}: {manip_sig.description}")
+                                continue
+
                             positions = db_mod.get_positions()
                             recent_trades = db_mod.get_recent_trades(symbol=symbol, limit=5)
                             trade_stats = db_mod.get_trade_stats(symbol=symbol)
@@ -255,6 +338,34 @@ async def run_trading(config):
                             leverage = getattr(signal_obj, "leverage", 1)
 
                             if action in ("long", "short"):
+                                # ── Equity protection gate ─────────────────────
+                                prot = eq_protector.current_state
+                                if prot.pause_new:
+                                    logger.info(f"[PROTECT] {prot.level}: new trades paused")
+                                    continue
+
+                                # ── Fake-breakout filter (scalping/grid only) ──
+                                # regime_momentum uses EMA cross — already filtered.
+                                # Only block on obvious pump/dump (vol 10×+ with reversal).
+                                if config.strategy not in ("regime_momentum", "momentum",
+                                                            "regime_mean_reversion"):
+                                    direction = "up" if action == "long" else "down"
+                                    bk = validate_breakout(df, direction, indicators)
+                                    if not bk.is_real:
+                                        logger.info(f"[BREAKOUT] Filtered: {bk.description}")
+                                        continue
+
+                                # ── Dynamic leverage ───────────────────────────
+                                if config.dynamic_leverage_enabled:
+                                    leverage = calculate_dynamic_leverage(
+                                        base_leverage=leverage,
+                                        indicators=indicators,
+                                        regime=_signals.get("rotation", {}).get("regime", "neutral"),
+                                        recent_trades=db_mod.get_recent_trades(limit=10),
+                                        protection_level=prot.level,
+                                        max_leverage=config.max_leverage,
+                                    )
+
                                 # ── RULE: State reasoning out loud before trade ──
                                 console.print(Panel(
                                     f"[bold cyan]📢 BEFORE TRADE — {symbol} {action.upper()}[/bold cyan]\n\n"
@@ -276,6 +387,34 @@ async def run_trading(config):
                                 )
 
                                 if approved and adj_size > 0:
+                                    # ── Composite size multiplier ─────────────
+                                    size_mult = 1.0
+                                    if config.session_sniper_mode:
+                                        size_mult *= session_info.size_multiplier
+                                    if config.session_learning_enabled:
+                                        size_mult *= sess_learner.get_multiplier()
+                                    if config.equity_protection_enabled:
+                                        size_mult *= prot.size_cap
+                                    if manip_sig and manip_sig.action == "reduce_size":
+                                        size_mult *= 0.5
+                                    # News sentiment filter
+                                    if news_sig and news_sig.bias == "short_favoured" and action == "long":
+                                        size_mult *= 0.5
+                                    elif news_sig and news_sig.bias == "long_favoured" and action == "long":
+                                        size_mult *= 1.2
+                                    # BTC dominance alt filter
+                                    if dom_sig and config.btc_dominance_enabled:
+                                        size_mult *= alt_size_multiplier(dom_sig, symbol)
+                                    # Monthly growth engine
+                                    if config.growth_engine_enabled:
+                                        size_mult *= growth_engine.update(
+                                            port_snapshot["total_value"]
+                                        )
+                                    adj_size = min(
+                                        adj_size * size_mult,
+                                        config.risk_max_position_pct,
+                                    )
+
                                     margin = port_snapshot["cash_balance"] * adj_size
                                     current_price = indicators.get("price", 0)
                                     atr = indicators.get("atr_14")
@@ -289,7 +428,8 @@ async def run_trading(config):
 
                                     order = await exchange.create_order(
                                         symbol, action, margin,
-                                        price=current_price, leverage=adj_lev
+                                        price=current_price, leverage=adj_lev,
+                                        stop_loss=sl, take_profit=tp,
                                     )
 
                                     db_mod.upsert_position(
@@ -302,6 +442,17 @@ async def run_trading(config):
                                         mode=config.trading_mode,
                                         reasoning=signal_obj.reasoning,
                                         confidence=signal_obj.confidence,
+                                    )
+                                    trailing_exits.register_position(
+                                        symbol, action, current_price, atr
+                                    )
+                                    if config.portfolio_allocator_enabled:
+                                        allocator.mark_open(symbol, action, current_price)
+                                    telegram.send(
+                                        f"*NEW TRADE* {symbol} {action.upper()}\n"
+                                        f"Entry `${current_price:,.2f}` | "
+                                        f"${margin:,.2f} × {adj_lev}x\n"
+                                        f"_{signal_obj.reasoning[:100]}_"
                                     )
                                     recent_pnl.append({
                                         "round": round_num, "symbol": symbol,
@@ -339,6 +490,10 @@ async def run_trading(config):
                                         "round": round_num, "symbol": symbol,
                                         "action": "close", "pnl": pnl,
                                     })
+                                    if config.session_learning_enabled:
+                                        sess_learner.record_trade(pnl)
+                                    if config.portfolio_allocator_enabled:
+                                        allocator.mark_closed(symbol, pnl)
 
                         except Exception as e:
                             logger.error(f"Error processing {symbol}: {e}", exc_info=True)
@@ -373,7 +528,173 @@ async def run_trading(config):
                         risk_summary=risk_sum,
                         perf_metrics=perf,
                         round=round_num,
+                        signals=_signals,
                     )
+
+                    # ── Trailing exit checks ──────────────────────────────────
+                    for pos in db_mod.get_positions():
+                        sym = pos["symbol"]
+                        px  = prices.get(sym)
+                        if not px:
+                            continue
+                        dec = trailing_exits.evaluate(sym, float(px))
+                        if dec.action in ("close_full", "close_partial"):
+                            try:
+                                order = await exchange.create_order(
+                                    sym, "close", 0, price=float(px)
+                                )
+                                pnl = order.get("pnl", 0.0)
+                                risk_mgr.record_pnl(pnl)
+                                if dec.action == "close_full":
+                                    db_mod.delete_position(sym)
+                                    trailing_exits.remove_position(sym)
+                                db_mod.log_trade(
+                                    symbol=sym, side="close", price=float(px),
+                                    amount=0, strategy=config.strategy,
+                                    mode=config.trading_mode,
+                                    reasoning=f"Trail: {dec.reason}",
+                                    confidence=1.0, pnl=pnl,
+                                )
+                                telegram.send(
+                                    f"*TRAIL EXIT* `{sym}`: {dec.reason}\nPnL `${pnl:+.2f}`"
+                                )
+                            except Exception as exc:
+                                logger.error(f"Trail exit failed {sym}: {exc}")
+
+                    # ── Equity protection (tiered) ────────────────────────────
+                    equity_curve.append(port_snapshot["total_value"])
+                    if config.equity_protection_enabled:
+                        prot_state = eq_protector.update(port_snapshot["total_value"])
+                        _signals["protection"] = {
+                            "level":   prot_state.level,
+                            "drawdown": f"{prot_state.drawdown:.1%}",
+                            "message": prot_state.message,
+                        }
+                        if prot_state.level in ("RED", "BLACK"):
+                            telegram.send(
+                                f"*EQUITY PROTECTION {prot_state.level}*\n"
+                                f"{prot_state.message}\nDrawdown: `{prot_state.drawdown:.1%}`"
+                            )
+                        if prot_state.close_all:
+                            for pos in db_mod.get_positions():
+                                sym = pos["symbol"]
+                                px  = prices.get(sym)
+                                if px:
+                                    try:
+                                        await exchange.create_order(sym, "close", 0, price=float(px))
+                                        db_mod.delete_position(sym)
+                                    except Exception:
+                                        pass
+
+                    # ── Hedging ───────────────────────────────────────────────
+                    if config.hedging_enabled:
+                        hedge_signals = hedge_mgr.evaluate(
+                            db_mod.get_positions(), prices, port_snapshot["cash_balance"]
+                        )
+                        for hsig in hedge_signals:
+                            if hsig.action == "open_hedge":
+                                try:
+                                    margin = port_snapshot["cash_balance"] * hsig.size_pct
+                                    px = float(prices.get(hsig.symbol) or 0)
+                                    if px > 0 and margin > 1:
+                                        await exchange.create_order(
+                                            hsig.symbol, hsig.side, margin, price=px, leverage=1
+                                        )
+                                        telegram.send(f"*HEDGE OPENED* `{hsig.symbol}`\n_{hsig.reason}_")
+                                except Exception as exc:
+                                    logger.error(f"Hedge open failed: {exc}")
+                            elif hsig.action == "close_hedge":
+                                logger.info(f"[HEDGE] Closing hedge on {hsig.symbol}: {hsig.reason}")
+                                telegram.send(f"*HEDGE CLOSED* `{hsig.symbol}` — {hsig.reason}")
+                        _signals["hedges"] = hedge_mgr.active_hedges
+
+                    # ── Portfolio allocator rebalance ─────────────────────────
+                    if config.portfolio_allocator_enabled and round_num % 6 == 0:
+                        ranked = [s.symbol for s in _signals.get("coin_scores", [])] \
+                                 or config.trading_pairs
+                        alloc_plan = allocator.allocate(
+                            port_snapshot["cash_balance"], ranked
+                        )
+                        _signals["allocation"] = alloc_plan.description
+                        for slot in allocator.slots:
+                            px = prices.get(slot.symbol)
+                            if px:
+                                allocator.update_unrealised(slot.symbol, float(px))
+
+                    # ── Growth engine status ──────────────────────────────────
+                    if config.growth_engine_enabled:
+                        _signals["growth"] = growth_engine.status_line()
+
+                    # ── Coin rotation ─────────────────────────────────────────
+                    if config.coin_rotation_enabled and round_num % 6 == 0:
+                        try:
+                            scores = await coin_rotator.rank(fetcher, config.timeframe)
+                            _signals["coin_scores"] = [
+                                {"symbol": s.symbol, "composite": s.composite,
+                                 "momentum": s.momentum, "recommended": s.recommended}
+                                for s in scores
+                            ]
+                            top = coin_rotator.top_pairs
+                            if top:
+                                logger.info(f"[COIN ROT] Top pairs: {top}")
+                        except Exception as exc:
+                            logger.debug(f"Coin rotation error: {exc}")
+
+                    # ── Equity curve optimizer ────────────────────────────────
+                    if config.equity_optimizer_enabled:
+                        advice = analyze_equity(
+                            equity_curve, db_mod.get_recent_trades(limit=20)
+                        )
+                        _signals["equity"] = {
+                            "health": advice.health,
+                            "note":   advice.suggestions[0] if advice.suggestions else "",
+                            "adj":    advice.size_adjustment,
+                        }
+                        if advice.health == "critical":
+                            telegram.send(f"*EQUITY ALERT* {advice.suggestions[0]}")
+
+                    # ── Multi-strategy rotation ───────────────────────────────
+                    if config.strategy_rotation_enabled:
+                        try:
+                            reg = detect_regime(df)
+                            eq_health = _signals.get("equity", {}).get("health", "good")
+                            rot = rotator.should_rotate(reg.regime, eq_health)
+                            round_pnl = (equity_curve[-1] - equity_curve[-2]
+                                         if len(equity_curve) >= 2 else 0.0)
+                            rotator.record_round_pnl(rotator.current_strategy, round_pnl)
+                            if rot.should_rotate:
+                                rotator.apply_rotation(rot.suggested_strategy)
+                                strategy = get_strategy(rotator.current_strategy, config)
+                                telegram.send(
+                                    f"*Strategy Rotated* → `{rotator.current_strategy}`\n"
+                                    f"_{rot.reason}_"
+                                )
+                            _signals["rotation"] = {
+                                "current": rotator.current_strategy,
+                                "regime":  reg.regime,
+                            }
+                        except Exception as exc:
+                            logger.debug(f"Rotation check error: {exc}")
+
+                    # ── Weekly optimizer (background task) ────────────────────
+                    if config.auto_optimize_weekly and should_run_weekly():
+                        asyncio.create_task(
+                            run_optimization(config, send_alert=telegram.send)
+                        )
+
+                    # ── Sync Telegram commander state ─────────────────────────
+                    _tg_state.update({
+                        "portfolio":    port_snapshot,
+                        "risk_summary": risk_sum,
+                        "perf_metrics": perf,
+                        "positions":    db_mod.get_positions(),
+                        "round":        round_num,
+                        "strategy":     rotator.current_strategy,
+                        "signals":      _signals,
+                        "coin_scores":  _signals.get("coin_scores", []),
+                        "protection":   eq_protector.current_state.level,
+                        "session_best": sess_learner.best_hours(3),
+                    })
 
                 except Exception as e:
                     logger.error(f"Trading loop error: {e}", exc_info=True)
@@ -387,6 +708,7 @@ async def run_trading(config):
 
     finally:
         logger.info("Shutting down...")
+        telegram.stop()
         await price_feed.stop()
         await exchange.close()
         logger.info("Bot stopped cleanly.")
