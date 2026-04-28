@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import ccxt.async_support as ccxt
 
+from data.database import get_cached_ohlcv
 from exchange.base import ExchangeClient
 from utils.helpers import retry_async
 
@@ -29,8 +30,9 @@ class PaperExchange(ExchangeClient):
     - Halts on balance reaching $0
     """
 
-    def __init__(self, config):
+    def __init__(self, config, exchange_id: str = ""):
         self._config = config
+        self._exchange_id = exchange_id or config.exchange
         self._slippage = config.paper_slippage_pct
 
         # Cash balance (USDT)
@@ -40,18 +42,20 @@ class PaperExchange(ExchangeClient):
         self._positions: Dict[str, Dict] = {}
         self._orders: List[Dict] = []
 
-        # Read-only market data
-        exchange_cls = getattr(ccxt, config.exchange, ccxt.bybit)
-        opts: dict = {"enableRateLimit": True}
-        if config.exchange == "bybit":
+        # Read-only market data (public endpoints, no credentials needed)
+        exchange_cls = getattr(ccxt, self._exchange_id, ccxt.bitget)
+        opts: dict = {"enableRateLimit": True, "verify": False}
+        if self._exchange_id in ("bitget", "toobit"):
+            opts["options"] = {"defaultType": "swap"}
+        elif self._exchange_id == "bybit":
             opts["options"] = {"defaultType": "linear"}
-        elif config.exchange == "hyperliquid":
-            pass  # Hyperliquid public endpoints need no auth or special options
+        elif self._exchange_id != "hyperliquid":
+            opts["options"] = {"defaultType": "swap"}
         self._market = exchange_cls(opts)
-        self._quote_currency = "USDC" if config.exchange == "hyperliquid" else "USDT"
+        self._quote_currency = "USDC" if self._exchange_id == "hyperliquid" else "USDT"
 
         logger.info(
-            f"[bold yellow]PAPER TRADING MODE (PERPS)[/bold yellow] — "
+            f"[bold yellow]PAPER TRADING MODE (PERPS) [{self._exchange_id.upper()}][/bold yellow] — "
             f"Starting balance: ${config.paper_initial_balance:,.2f} USDT | "
             f"Max leverage: {config.max_leverage}x"
         )
@@ -60,10 +64,20 @@ class PaperExchange(ExchangeClient):
 
     def _resolve(self, symbol: str) -> str:
         """Return the symbol to use for public market data queries.
-        Hyperliquid natively serves perp symbols; others need spot conversion."""
-        if self._config.exchange == "hyperliquid":
-            return symbol  # use perp symbol directly
+        Hyperliquid and swap exchanges serve perp symbols directly."""
+        if self._exchange_id in ("hyperliquid", "bitget", "toobit"):
+            return symbol
         return _to_spot(symbol)
+
+    def _cached_ticker(self, symbol: str) -> Optional[Dict]:
+        """Build a minimal ticker from the most-recent cached OHLCV candle."""
+        rows = get_cached_ohlcv(self._exchange_id, symbol, self._config.timeframe, limit=1)
+        if rows:
+            last_close = rows[0][4]  # close column
+            return {"symbol": symbol, "last": last_close, "close": last_close,
+                    "bid": last_close * 0.9999, "ask": last_close * 1.0001,
+                    "high": rows[0][2], "low": rows[0][3], "volume": rows[0][5]}
+        return None
 
     @retry_async(attempts=3)
     async def fetch_ohlcv(self, symbol: str, timeframe: str,
@@ -72,7 +86,13 @@ class PaperExchange(ExchangeClient):
         try:
             return await self._market.fetch_ohlcv(q, timeframe, since=since, limit=limit)
         except Exception:
-            return await self._market.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            try:
+                return await self._market.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            except Exception:
+                cached = get_cached_ohlcv(self._exchange_id, symbol, timeframe, since, limit)
+                if cached:
+                    return cached
+                raise
 
     @retry_async(attempts=3)
     async def fetch_ticker(self, symbol: str) -> Dict:
@@ -80,7 +100,13 @@ class PaperExchange(ExchangeClient):
         try:
             return await self._market.fetch_ticker(q)
         except Exception:
-            return await self._market.fetch_ticker(symbol)
+            try:
+                return await self._market.fetch_ticker(symbol)
+            except Exception:
+                fallback = self._cached_ticker(symbol)
+                if fallback:
+                    return fallback
+                raise
 
     @retry_async(attempts=3)
     async def fetch_tickers(self, symbols: List[str]) -> Dict[str, Dict]:
@@ -95,7 +121,9 @@ class PaperExchange(ExchangeClient):
                 try:
                     result[s] = await self.fetch_ticker(s)
                 except Exception:
-                    pass
+                    fallback = self._cached_ticker(s)
+                    if fallback:
+                        result[s] = fallback
             return result
 
     @retry_async(attempts=3)

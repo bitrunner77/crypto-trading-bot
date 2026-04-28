@@ -18,34 +18,28 @@ logger = logging.getLogger("cryptobot.exchange")
 class CCXTClient(ExchangeClient):
     """Production exchange client via CCXT."""
 
-    def __init__(self, config):
-        exchange_cls = getattr(ccxt, config.exchange, None)
+    def __init__(self, config, exchange_id: str = ""):
+        eid = exchange_id or config.exchange
+        exchange_cls = getattr(ccxt, eid, None)
         if exchange_cls is None:
-            raise ValueError(f"Unknown exchange '{config.exchange}'. Check CCXT docs for supported exchanges.")
+            raise ValueError(f"Unknown exchange '{eid}'. Check CCXT docs for supported exchanges.")
 
-        if config.exchange == "hyperliquid":
-            opts: dict = {
-                "walletAddress": config.exchange_wallet_address,
-                "privateKey": config.exchange_api_secret,
-                "enableRateLimit": True,
-            }
-        elif config.exchange == "bybit":
-            opts = {
-                "apiKey": config.exchange_api_key,
-                "secret": config.exchange_api_secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "linear"},
-            }
-        else:
-            opts = {
-                "apiKey": config.exchange_api_key,
-                "secret": config.exchange_api_secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "future"},
-            }
+        creds = config.credentials_for(eid)
+        opts: dict = {**creds, "enableRateLimit": True, "verify": False}
+
+        if eid == "bitget":
+            opts["options"] = {"defaultType": "swap"}
+        elif eid == "toobit":
+            opts["options"] = {"defaultType": "swap"}
+        elif eid == "bybit":
+            opts["options"] = {"defaultType": "linear"}
+        elif eid != "hyperliquid":
+            opts["options"] = {"defaultType": "swap"}
+
         self._exchange: ccxt.Exchange = exchange_cls(opts)
+        self._exchange_id = eid
         self._config = config
-        logger.info(f"Initialized CCXT client for [bold]{config.exchange}[/bold]")
+        logger.info(f"Initialized CCXT client for [bold]{eid}[/bold]")
 
     @retry_async(attempts=3)
     async def fetch_ohlcv(

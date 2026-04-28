@@ -21,10 +21,19 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(..., description="Anthropic API key")
 
     # ── Exchange ───────────────────────────────────────────────────────────────
-    exchange: str = Field("bybit", description="CCXT exchange id")
-    exchange_api_key: str = Field("", description="Exchange API key (not used by Hyperliquid)")
-    exchange_api_secret: str = Field("", description="Exchange API secret / Hyperliquid private key")
+    # Single exchange (backward compat). If EXCHANGES is set, it takes precedence.
+    exchange: str = Field("bitget", description="Primary CCXT exchange id")
+    # Multi-exchange: comma-separated or JSON list, e.g. ["bitget","toobit"]
+    exchanges: List[str] = Field(default=[], description="All exchanges to trade on simultaneously")
+    exchange_api_key: str = Field("", description="Exchange API key")
+    exchange_api_secret: str = Field("", description="Exchange API secret")
     exchange_wallet_address: str = Field("", description="Wallet address (Hyperliquid only)")
+    # Per-exchange credentials: BITGET_API_KEY, BITGET_API_SECRET, TOOBIT_API_KEY, etc.
+    bitget_api_key: str = Field("", description="Bitget API key")
+    bitget_api_secret: str = Field("", description="Bitget API secret")
+    bitget_passphrase: str = Field("", description="Bitget passphrase")
+    toobit_api_key: str = Field("", description="Toobit API key")
+    toobit_api_secret: str = Field("", description="Toobit API secret")
 
     # ── Trading ────────────────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = Field("paper")
@@ -64,12 +73,41 @@ class Settings(BaseSettings):
     # ── Logging ────────────────────────────────────────────────────────────────
     log_level: str = Field("INFO")
 
-    @field_validator("trading_pairs", mode="before")
+    @field_validator("trading_pairs", "exchanges", mode="before")
     @classmethod
-    def parse_pairs(cls, v):
+    def parse_str_list(cls, v):
         if isinstance(v, str):
             return [p.strip() for p in v.split(",") if p.strip()]
         return v
+
+    def active_exchanges(self) -> List[str]:
+        """Return the effective list of exchanges to trade on."""
+        if self.exchanges:
+            return self.exchanges
+        return [self.exchange]
+
+    def credentials_for(self, exchange_id: str) -> dict:
+        """Return API credentials for the given exchange id."""
+        if exchange_id == "bitget":
+            return {
+                "apiKey": self.bitget_api_key or self.exchange_api_key,
+                "secret": self.bitget_api_secret or self.exchange_api_secret,
+                "password": self.bitget_passphrase,
+            }
+        if exchange_id == "toobit":
+            return {
+                "apiKey": self.toobit_api_key or self.exchange_api_key,
+                "secret": self.toobit_api_secret or self.exchange_api_secret,
+            }
+        if exchange_id == "hyperliquid":
+            return {
+                "walletAddress": self.exchange_wallet_address,
+                "privateKey": self.exchange_api_secret,
+            }
+        return {
+            "apiKey": self.exchange_api_key,
+            "secret": self.exchange_api_secret,
+        }
 
 
 def load_settings() -> Settings:

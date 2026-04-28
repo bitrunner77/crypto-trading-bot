@@ -122,21 +122,43 @@ def build_config(args):
     return settings
 
 
-def make_exchange(config):
+def make_exchange(config, exchange_id: str = ""):
+    eid = exchange_id or config.exchange
     if config.trading_mode == "paper":
         from exchange.paper_exchange import PaperExchange
-        return PaperExchange(config)
+        return PaperExchange(config, exchange_id=eid)
     from exchange.ccxt_client import CCXTClient
-    return CCXTClient(config)
+    return CCXTClient(config, exchange_id=eid)
 
 
 # ── LIVE / PAPER TRADING LOOP ──────────────────────────────────────────────────
 
 async def run_trading(config):
-    global _prev_balance
-
+    """Entry point: spawns one trading coroutine per configured exchange."""
     from utils.helpers import setup_logging
     from data.database import init_db
+    from ui.dashboard import print_startup_banner
+    from ui.web_dashboard import start_in_thread
+
+    setup_logging(config.log_level)
+    print_startup_banner(config)
+    init_db()
+    start_in_thread(port=8080)
+
+    exchange_ids = config.active_exchanges()
+    if len(exchange_ids) == 1:
+        await _run_exchange_loop(config, exchange_ids[0])
+    else:
+        console.print(
+            f"[bold cyan]Multi-exchange mode:[/bold cyan] "
+            + ", ".join(f"[yellow]{e.upper()}[/yellow]" for e in exchange_ids)
+        )
+        await asyncio.gather(*[_run_exchange_loop(config, eid) for eid in exchange_ids])
+
+
+async def _run_exchange_loop(config, exchange_id: str):
+    global _prev_balance
+
     import data.database as db_mod
     from data.fetcher import DataFetcher
     from exchange.websocket_manager import PriceFeed
@@ -144,21 +166,17 @@ async def run_trading(config):
     from portfolio.tracker import PortfolioTracker
     from risk.manager import RiskManager
     from strategies.registry import get_strategy
-    from ui.dashboard import Dashboard, print_startup_banner
-    from ui.web_dashboard import start_in_thread, update_state
+    from ui.dashboard import Dashboard
+    from ui.web_dashboard import update_state
     from rich.live import Live
 
-    setup_logging(config.log_level)
-    print_startup_banner(config)
-    init_db()
-    start_in_thread(port=8080)
-
-    exchange = make_exchange(config)
+    exchange = make_exchange(config, exchange_id)
     fetcher = DataFetcher(exchange, config)
     strategy = get_strategy(config.strategy, config)
     risk_mgr = RiskManager(config)
     portfolio = PortfolioTracker(exchange, config, db_mod)
     dashboard = Dashboard(config)
+    tag = f"[{exchange_id.upper()}]"  # label for log lines in multi-exchange mode
 
     # Price feed
     price_feed = PriceFeed(exchange, config.trading_pairs, poll_interval=5.0)
@@ -174,10 +192,11 @@ async def run_trading(config):
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    logger.info(f"Trading loop started — interval: {config.loop_interval_seconds}s")
+    logger.info(f"{tag} Trading loop started — interval: {config.loop_interval_seconds}s")
 
-    # Track P&L across rounds
+    # Track P&L across rounds (per-exchange)
     recent_pnl: List[Dict] = []
+    prev_balance: float = 0.0
 
     try:
         with Live(refresh_per_second=1, console=None) as live:
@@ -190,8 +209,8 @@ async def run_trading(config):
                     portfolio.update_prices(prices)
 
                     balance_at_round_start = port_snapshot["cash_balance"]
-                    if _prev_balance == 0:
-                        _prev_balance = balance_at_round_start
+                    if prev_balance == 0:
+                        prev_balance = balance_at_round_start
 
                     round_num = risk_mgr.increment_round()
                     round_decisions: List[Dict] = []
@@ -348,8 +367,8 @@ async def run_trading(config):
                     if hasattr(exchange, "get_cash_balance"):
                         new_balance = exchange.get_cash_balance()
 
-                    _print_round_summary(round_num, _prev_balance, new_balance, round_decisions)
-                    _prev_balance = new_balance
+                    _print_round_summary(round_num, prev_balance, new_balance, round_decisions)
+                    prev_balance = new_balance
 
                     # Update dashboard
                     perf = portfolio.get_performance_metrics()
