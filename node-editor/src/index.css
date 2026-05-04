@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.react-flow__edge-path {
+  stroke: #ff7a1a !important;
+}
+
+.react-flow__handle {
+  border-radius: 9999px;
+}
+
+.react-flow__attribution {
+  background: transparent !important;
+  color: #4a5160 !important;
+}
+
+textarea::-webkit-scrollbar,
+.nodrag::-webkit-scrollbar {
+  width: 6px;
+}
+
+textarea::-webkit-scrollbar-thumb,
+.nodrag::-webkit-scrollbar-thumb {
+  background: #2a313d;
+  border-radius: 6px;
+}
