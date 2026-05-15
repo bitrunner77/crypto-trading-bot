@@ -99,6 +99,15 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field("", description="Telegram bot token")
     telegram_chat_id:   str = Field("", description="Telegram chat ID")
 
+    # ── Polymarket / MLB Betting ───────────────────────────────────────────────
+    polymarket_enabled:        bool  = Field(False, description="Enable Polymarket MLB scanner")
+    polymarket_paper_bankroll: float = Field(1000.0, description="Starting paper-bet bankroll (USD)")
+    polymarket_market_limit:   int   = Field(50,    description="Max markets fetched per scan")
+    polymarket_min_edge:       float = Field(0.03,  description="Minimum edge required to bet (3%)")
+    polymarket_max_stake_pct:  float = Field(0.05,  description="Max bankroll fraction per bet")
+    polymarket_fee_pct:        float = Field(0.0,   description="Effective per-trade fee for sizing")
+    polymarket_min_liquidity:  float = Field(500.0, description="Skip markets below this liquidity")
+
     @field_validator("trading_pairs", mode="before")
     @classmethod
     def parse_pairs(cls, v):
