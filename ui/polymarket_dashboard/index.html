@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Polymarket Trading Bot — Singularity Engine</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- TOP TICKER -->
+    <header class="ticker top-ticker">
+      <span class="status-dot"></span>
+      <div class="ticker-track" id="topTicker"></div>
+      <div class="utc" id="utcClock">UTC 00:00:00 LAT 0MS</div>
+    </header>
+
+    <!-- ROW 1 -->
+    <section class="row row-1">
+      <!-- TRADES (left) -->
+      <div class="panel panel-trades">
+        <div class="panel-head">
+          <span class="title">TRADES</span>
+          <span class="sub" id="tradesMarketLabel">ALL MARKETS</span>
+        </div>
+        <ul class="trades-list" id="tradesList"></ul>
+      </div>
+
+      <!-- PORTFOLIO P/L (center) -->
+      <div class="panel panel-pl">
+        <div class="panel-head">
+          <span class="title">PORTFOLIO P/L</span>
+          <span class="sub" id="plUnrealized">UNREALIZED P/L</span>
+        </div>
+        <div class="pl-body">
+          <ul class="pl-fills" id="plFills"></ul>
+          <div class="pl-chart-wrap">
+            <div class="pl-big" id="plBig">+$0</div>
+            <canvas id="plCurve" class="pl-curve"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- SINGULARITY + PRESSURE (right) -->
+      <div class="panel panel-right">
+        <div class="panel-head">
+          <span class="title">SINGULARITY</span>
+          <span class="sub">GRAVITY</span>
+        </div>
+        <div class="singularity-wrap">
+          <canvas id="singularity" class="singularity"></canvas>
+          <div class="sing-meta">
+            <span class="lbl">EVENT HORIZON</span>
+            <span class="val" id="singVal">0.000</span>
+          </div>
+        </div>
+        <div class="panel-head subhead">
+          <span class="title">BUY → PRESSURE → SELL</span>
+          <span class="sub">MARK</span>
+        </div>
+        <div class="pressure-list" id="pressureList"></div>
+      </div>
+    </section>
+
+    <!-- ROW 2 — KPI STRIP -->
+    <section class="row row-kpi">
+      <div class="kpi">
+        <div class="kpi-label">P/L TOTAL</div>
+        <div class="kpi-value green" id="kpiPL">+$0</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">WIN RATE</div>
+        <div class="kpi-value cyan" id="kpiWin">0.0%</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">SPREAD</div>
+        <div class="kpi-value amber" id="kpiSpread">0.0C</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">FILLS/MIN</div>
+        <div class="kpi-value green" id="kpiFills">0</div>
+      </div>
+    </section>
+
+    <!-- ROW 3 -->
+    <section class="row row-3">
+      <!-- ORDER BOOK -->
+      <div class="panel panel-book">
+        <div class="panel-head">
+          <span class="title">ORDER BOOK DEPTH</span>
+          <span class="sub" id="bookSpread">SPREAD $0.00</span>
+        </div>
+        <ul class="book asks" id="bookAsks"></ul>
+        <div class="book-spread" id="bookSpreadBar">SPREAD: $0.00</div>
+        <ul class="book bids" id="bookBids"></ul>
+      </div>
+
+      <!-- KELLY + NASH -->
+      <div class="panel panel-kelly-nash">
+        <div class="sub-panel">
+          <div class="panel-head">
+            <span class="title">KELLY SURFACE</span>
+            <span class="sub">FRACTIONAL SIZING</span>
+          </div>
+          <canvas id="kellySurface" class="chart-canvas"></canvas>
+        </div>
+        <div class="sub-panel">
+          <div class="panel-head">
+            <span class="title">NASH REGIME</span>
+            <span class="sub" id="nashState">EQUILIBRIUM DRIFT</span>
+          </div>
+          <canvas id="nashRegime" class="chart-canvas"></canvas>
+        </div>
+      </div>
+
+      <!-- RUNTIME CONSOLE -->
+      <div class="panel panel-console">
+        <div class="panel-head">
+          <span class="title">RUNTIME CONSOLE</span>
+          <span class="sub blink">● LIVE</span>
+        </div>
+        <ul class="console" id="console"></ul>
+      </div>
+    </section>
+
+    <!-- ROW 4 -->
+    <section class="row row-4">
+      <div class="panel panel-spectrum">
+        <div class="panel-head">
+          <span class="title">SPECTRUM</span>
+          <span class="sub" id="specHz">28 BANDS</span>
+        </div>
+        <canvas id="spectrum" class="chart-canvas"></canvas>
+      </div>
+      <div class="panel panel-btc">
+        <div class="panel-head">
+          <span class="title">BTC PRICE ACTION</span>
+          <span class="sub" id="btcMark">$0</span>
+        </div>
+        <canvas id="btcChart" class="chart-canvas"></canvas>
+      </div>
+    </section>
+
+    <!-- BOTTOM TICKER -->
+    <footer class="ticker bottom-ticker">
+      <div class="ticker-track" id="bottomTicker"></div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
