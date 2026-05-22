@@ -1,11 +1,13 @@
 """Smoke tests for the Truer Foods dispatch tool."""
 import csv
+import json
 from pathlib import Path
 
 from openpyxl import load_workbook
 
 import add
 import dispatch
+import extract
 import zones
 
 SAMPLE = Path(__file__).parent / "sample_orders.csv"
@@ -123,6 +125,79 @@ def test_add_main_appends_and_dispatches(tmp_path, monkeypatch):
     wb = load_workbook(out_path)
     assert "Driver 1" in wb.sheetnames
     assert "Driver 2" in wb.sheetnames
+
+
+def test_extract_parse_basic():
+    raw = json.dumps({"stops": [
+        {"customer": "Tojo's", "address": "1133 W Broadway Vancouver BC V6H 1G1",
+         "boxes": 3, "product_type": "fresh", "window": "AM only",
+         "notes": "Back door"}
+    ]})
+    stops = extract.parse_response(raw)
+    assert len(stops) == 1
+    s = stops[0]
+    assert s["customer"] == "Tojo's"
+    assert s["postal_code"] == "V6H"
+    assert s["boxes"] == "3"
+    assert s["product_type"] == "fresh"
+
+
+def test_extract_parse_strips_markdown_fences():
+    raw = '```json\n{"stops": [{"customer": "X", "address": "5731 No 3 Rd Richmond BC V6X 2C9"}]}\n```'
+    stops = extract.parse_response(raw)
+    assert stops[0]["postal_code"] == "V6X"
+
+
+def test_extract_parse_skips_incomplete():
+    raw = json.dumps({"stops": [
+        {"customer": "Has no address"},
+        {"address": "Has no customer"},
+        {"customer": "Good", "address": "5731 No 3 Rd Richmond BC V6X 2C9"},
+    ]})
+    stops = extract.parse_response(raw)
+    assert len(stops) == 1
+    assert stops[0]["customer"] == "Good"
+
+
+def test_extract_parse_defaults_boxes_to_1():
+    raw = json.dumps({"stops": [
+        {"customer": "X", "address": "5731 No 3 Rd Richmond BC V6X 2C9"}
+    ]})
+    stops = extract.parse_response(raw)
+    assert stops[0]["boxes"] == "1"
+
+
+def test_extract_main_with_image_appends(tmp_path, monkeypatch):
+    img = tmp_path / "scr.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n fake")
+    csv_path = tmp_path / "today.csv"
+    monkeypatch.setattr(extract, "call_claude", lambda *a, **kw: json.dumps({
+        "stops": [
+            {"customer": "Sushi Mart", "address": "5731 No 3 Rd Richmond BC V6X 2C9", "boxes": 6},
+            {"customer": "Tojo's", "address": "1133 W Broadway Vancouver BC V6H 1G1", "boxes": 3, "product_type": "fresh"},
+        ]
+    }))
+    rc = extract.main(["--image", str(img), "--file", str(csv_path),
+                       "--yes", "--no-dispatch"])
+    assert rc == 0
+    rows = list(csv.DictReader(csv_path.open()))
+    assert len(rows) == 2
+    assert rows[0]["customer"] == "Sushi Mart"
+    assert rows[0]["postal_code"] == "V6X"
+    assert rows[1]["product_type"] == "fresh"
+
+
+def test_extract_main_paste_mode(tmp_path, monkeypatch):
+    csv_path = tmp_path / "today.csv"
+    monkeypatch.setattr("sys.stdin", type("S", (), {"read": staticmethod(lambda: "raw text")})())
+    monkeypatch.setattr(extract, "call_claude", lambda *a, **kw: json.dumps({
+        "stops": [{"customer": "Y", "address": "4022 Hastings St Burnaby BC V5C 2H8"}]
+    }))
+    rc = extract.main(["--paste", "--file", str(csv_path), "--yes", "--no-dispatch"])
+    assert rc == 0
+    rows = list(csv.DictReader(csv_path.open()))
+    assert len(rows) == 1
+    assert rows[0]["postal_code"] == "V5C"
 
 
 def test_end_to_end(tmp_path):

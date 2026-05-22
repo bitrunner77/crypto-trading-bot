@@ -11,9 +11,41 @@ workbook with one route sheet per driver plus a summary tab.
 pip install -r requirements.txt
 ```
 
-## Daily use — two ways
+## Daily use — three ways
 
-### Option A: Interactive entry (easiest)
+### Option A: Screenshot or paste (fastest when orders come in messy)
+
+If an order comes in as a phone-camera photo, an email screenshot, a
+clip of a Google Sheet, or just text on the clipboard, hand it to
+Claude:
+
+```bash
+python extract.py --image screenshot.png        # PNG/JPG/WEBP/GIF
+python extract.py --text orders.txt             # any text file
+python extract.py --paste                       # paste, then Ctrl+D
+```
+
+The tool sends the input to Claude, gets back a clean list of stops,
+prints them for review (with the detected zone for each), and asks
+before appending to `orders.csv`. Then it offers to generate the
+Excel right away.
+
+Requirements:
+- `ANTHROPIC_API_KEY` in your environment or in the project's `.env`
+  (the same key the trading bot uses).
+- The `anthropic` package: `pip install anthropic` (already in the
+  dispatch `requirements.txt`).
+
+Flags:
+- `--file today.csv` — append to a different CSV.
+- `--yes` / `-y` — skip the confirm prompt (good for automation).
+- `--no-dispatch` — skip the "generate Excel?" question.
+
+The model defaults to Claude Sonnet 4.6, which is plenty for this and
+cheap. Override with `DISPATCH_MODEL=claude-opus-4-7` if you ever
+need it.
+
+### Option B: Interactive entry (easiest for typed orders)
 
 Just type each stop as it comes in. The zone is detected from the
 address's postal code as you go.
@@ -45,7 +77,7 @@ Useful flags:
 - `--file today.csv` — keep separate lists per day instead of overwriting.
 - `--no-dispatch` — skip the "generate Excel?" prompt.
 
-### Option B: Prepare a CSV yourself
+### Option C: Prepare a CSV yourself
 
 If you already have orders in a spreadsheet, save it as CSV with these
 columns (see `sample_orders.csv`):
