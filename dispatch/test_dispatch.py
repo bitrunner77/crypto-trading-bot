@@ -1,8 +1,10 @@
 """Smoke tests for the Truer Foods dispatch tool."""
+import csv
 from pathlib import Path
 
 from openpyxl import load_workbook
 
+import add
 import dispatch
 import zones
 
@@ -61,6 +63,66 @@ def test_split_keeps_zones_contiguous():
         # Zones inside a route should appear in non-decreasing drive_order
         orders = [s.drive_order for s in route]
         assert orders == sorted(orders)
+
+
+def test_prompt_stop_speed_entry(monkeypatch):
+    inputs = iter([
+        "Tojo's @ 1133 W Broadway Vancouver BC V6H 1G1",
+        "3", "fresh", "AM only", "Back door",
+    ])
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: next(inputs))
+    stop = add.prompt_stop(1)
+    assert stop["customer"] == "Tojo's"
+    assert stop["address"] == "1133 W Broadway Vancouver BC V6H 1G1"
+    assert stop["postal_code"] == "V6H"
+    assert stop["boxes"] == "3"
+    assert stop["product_type"] == "fresh"
+    assert stop["window"] == "AM only"
+    assert stop["notes"] == "Back door"
+
+
+def test_prompt_stop_two_step_entry(monkeypatch):
+    inputs = iter([
+        "Sushi Mart",
+        "5731 No 3 Rd Richmond BC V6X 2C9",
+        "", "", "", "",
+    ])
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: next(inputs))
+    stop = add.prompt_stop(1)
+    assert stop["customer"] == "Sushi Mart"
+    assert stop["postal_code"] == "V6X"
+    assert stop["boxes"] == "1"  # default
+
+
+def test_prompt_stop_blank_returns_none(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "")
+    assert add.prompt_stop(1) is None
+
+
+def test_add_main_appends_and_dispatches(tmp_path, monkeypatch):
+    csv_path = tmp_path / "today.csv"
+    out_path = tmp_path / "today.xlsx"
+    inputs = iter([
+        "Tojo's @ 1133 W Broadway Vancouver BC V6H 1G1",
+        "2", "fresh", "", "",
+        "Sushi Mart @ 5731 No 3 Rd Richmond BC V6X 2C9",
+        "3", "mixed", "AM only", "Dolly",
+        "",  # end of entry
+        "y",  # generate now
+        "2",  # drivers
+        str(out_path),  # output filename
+    ])
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: next(inputs))
+    rc = add.main(["--file", str(csv_path)])
+    assert rc == 0
+    rows = list(csv.DictReader(csv_path.open()))
+    assert len(rows) == 2
+    assert rows[0]["customer"] == "Tojo's"
+    assert rows[1]["postal_code"] == "V6X"
+    assert out_path.exists()
+    wb = load_workbook(out_path)
+    assert "Driver 1" in wb.sheetnames
+    assert "Driver 2" in wb.sheetnames
 
 
 def test_end_to_end(tmp_path):

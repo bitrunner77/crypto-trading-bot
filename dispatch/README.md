@@ -11,27 +11,62 @@ workbook with one route sheet per driver plus a summary tab.
 pip install -r requirements.txt
 ```
 
-## Daily use
+## Daily use — two ways
 
-1. Update `orders.csv` (or save your day's order list as a CSV anywhere).
+### Option A: Interactive entry (easiest)
 
-   **Required columns:** `customer`, `address`
-   **Optional columns:** `postal_code`, `boxes`, `product_type`, `window`, `notes`
+Just type each stop as it comes in. The zone is detected from the
+address's postal code as you go.
 
-   See `sample_orders.csv` for the format.
+```bash
+python add.py
+```
 
-2. Run:
+You'll be prompted for each stop. Speed shortcut: type
+`Customer @ Address` on the first prompt to fill both at once.
 
-   ```bash
-   python dispatch.py orders.csv --drivers 3 --out today.xlsx
-   ```
+```
+--- Stop #1 (blank or 'done' to finish) ---
+Customer (or 'Customer @ Address' to speed-enter): Tojo's @ 1133 W Broadway Vancouver BC V6H 1G1
+  -> Zone: Vancouver West (FSA V6H)
+Boxes [1]: 3
+Product (frozen/fresh/dry/mixed): fresh
+Time window (e.g. AM only, after 2pm): AM only
+Notes: Buzz at back door
+```
 
-   - `--drivers` — how many drivers/trucks you're sending out today.
-   - `--out` — Excel file to write (default `routes.xlsx`).
+Press Enter on a blank customer (or type `done`) to finish. You'll be
+asked if you want to generate the Excel right away; say yes, give the
+driver count, and you're done. Stops are saved to `orders.csv` as you
+go, so you can quit and resume later (re-run `python add.py` and it
+loads what's already there).
 
-3. Open `today.xlsx`. The first tab is a Summary; each driver gets
-   their own tab with stop number, address, boxes, notes, and a
-   clickable Google Maps link per stop.
+Useful flags:
+- `--file today.csv` — keep separate lists per day instead of overwriting.
+- `--no-dispatch` — skip the "generate Excel?" prompt.
+
+### Option B: Prepare a CSV yourself
+
+If you already have orders in a spreadsheet, save it as CSV with these
+columns (see `sample_orders.csv`):
+
+- **Required:** `customer`, `address`
+- **Optional:** `postal_code`, `boxes`, `product_type`, `window`, `notes`
+
+Then run:
+
+```bash
+python dispatch.py orders.csv --drivers 3 --out today.xlsx
+```
+
+- `--drivers` — how many drivers/trucks you're sending out today.
+- `--out` — Excel file to write (default `routes.xlsx`).
+
+### The output
+
+The first tab of the Excel is a Summary (driver counts, zones,
+boxes); each driver gets their own tab with stop number, address,
+boxes, notes, and a clickable Google Maps link per stop.
 
 ## How routing works
 
